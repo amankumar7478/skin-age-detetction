@@ -1,0 +1,7 @@
+# Install the CUDA build of torch first from https://pytorch.org (pick your CUDA version), then:
+numpy
+opencv-python
+matplotlib
+pillow
+timm        # needed by MiDaS-small via torch.hub
+streamlit
