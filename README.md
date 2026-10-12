@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Curvature-aware skin aging analysis (M.Tech project)
 
 Fusion U-Net wrinkle segmentation + frozen MiDaS-small curvature branch -> age estimate.
@@ -44,3 +45,6 @@ Push this repo to GitHub, then in a Kaggle notebook (Internet ON, GPU ON):
 !pip install -q timm
 !python scripts/01_midas_curvature_demo.py --images /kaggle/input/<your-dataset> --out /kaggle/working/demo
 ```
+=======
+# skin-age-detetction
+>>>>>>> b9c5ab5c4919adf4e83f14d4c5d5fff817d4b165
