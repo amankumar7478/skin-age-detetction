@@ -9,6 +9,7 @@ Configurations (each is the same small CNN, only the input channels differ):
   fused_s4       : wrinkle + curvature sigma 4         (our proposal)
   fused_s2       : wrinkle + curvature sigma 2
   fused_shuffled : wrinkle + curvature of a RANDOM OTHER image (control: should NOT help)
+  fused_zero     : wrinkle + an all-zero channel (control: does merely having 2 input channels matter?)
 
     python train/run_age_cv.py --smoke                      # quick check that it runs
     python train/run_age_cv.py                              # 1 seed, all configs (~1 h on RTX 2050)
@@ -31,7 +32,7 @@ from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
 CLASSES = ["young", "middle", "old"]
 S = 256
 CONFIGS = {"wrinkle": ["w"], "curv_only": ["c4"], "fused_s4": ["w", "c4"], "fused_s2": ["w", "c2"],
-           "fused_shuffled": ["w", "c4s"], "fused_multi": ["w", "c2", "c4"]}
+           "fused_shuffled": ["w", "c4s"], "fused_zero": ["w", "z"], "fused_multi": ["w", "c2", "c4"]}
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--folds", default="outputs/data_check/folds.csv")
@@ -39,7 +40,7 @@ ap.add_argument("--oof", default="outputs/oof_masks")
 ap.add_argument("--human", default="manual_wrinkle_masks")
 ap.add_argument("--wrinkle-source", choices=["oof", "human"], default="oof")
 ap.add_argument("--curv", default="outputs/curv")
-ap.add_argument("--configs", default="wrinkle,curv_only,fused_s4,fused_s2,fused_shuffled")
+ap.add_argument("--configs", default="wrinkle,curv_only,fused_s4,fused_s2,fused_shuffled,fused_zero")
 ap.add_argument("--seeds", type=int, default=1)
 ap.add_argument("--epochs", type=int, default=30)
 ap.add_argument("--bs", type=int, default=32)
@@ -75,7 +76,7 @@ for k, i in enumerate(df.image_number):
             c = cv2.resize(c, (S, S), interpolation=cv2.INTER_AREA)
         arr[k] = np.arcsinh(c / stats[key]["p90"]) / 2.5          # tame the huge range, keep the sign
 perm = np.random.default_rng(123).permutation(N)                    # shuffled-curvature control
-arrays = {"w": W, "c2": C2, "c4": C4, "c4s": C4[perm]}
+arrays = {"w": W, "c2": C2, "c4": C4, "c4s": C4[perm], "z": np.zeros_like(W)}
 for k, v in arrays.items():
     arrays[k] = (v - v.mean()) / (v.std() + 1e-8)
 y = df.group3.map({c: j for j, c in enumerate(CLASSES)}).values.astype(np.int64)
@@ -145,7 +146,7 @@ def metrics(yt, yp):
 
 
 # ---------------------------------------------------------------- run the ablation
-results, pooled_probs = {}, {}
+results, pooled_probs, seed_preds = {}, {}, {}
 for cfg in a.configs.split(","):
     X = torch.from_numpy(np.stack([arrays[c] for c in CONFIGS[cfg]], axis=1)).float()
     seed_metrics, probs_sum = [], np.zeros((N, len(CLASSES)))
@@ -158,6 +159,7 @@ for cfg in a.configs.split(","):
                 continue
             P[va] = train_predict(X, tr, va, seed * 100 + k)
         seed_metrics.append(metrics(y, P.argmax(1))); probs_sum += P
+        seed_preds.setdefault(cfg, []).append(P.argmax(1))
     pooled_probs[cfg] = probs_sum / a.seeds
     results[cfg] = seed_metrics
     m = seed_metrics
@@ -173,43 +175,34 @@ for cfg, m in results.items():
                      macro_f1=np.mean([r["macro_f1"] for r in m]), macro_f1_sd=np.std([r["macro_f1"] for r in m]),
                      **{f"recall_{c}": float(np.mean([r["recall"][j] for r in m])) for j, c in enumerate(CLASSES)}))
 summ = pd.DataFrame(rows)
-if "wrinkle" in pooled_probs:
-    rng = np.random.default_rng(0); base = pooled_probs["wrinkle"].argmax(1)
-    for cfg in pooled_probs:
-        if cfg == "wrinkle":
-            continue
-        pr, d = pooled_probs[cfg].argmax(1), []
-        for _ in range(1000):
-            ix = rng.integers(0, N, N)
-            d.append(metrics(y[ix], pr[ix])["macro_f1"] - metrics(y[ix], base[ix])["macro_f1"])
-        lo, hi = np.percentile(d, [2.5, 97.5])
-        summ.loc[summ.config == cfg, "dF1_vs_wrinkle"] = float(np.mean(d))
-        summ.loc[summ.config == cfg, "dF1_95CI"] = f"[{lo:+.3f}, {hi:+.3f}]"
-
-# compare every config with a reference, per seed (training randomness) and by bootstrap (test-set sampling)
+# Paired comparison of every config with a reference config.
+#  * seedmean/seedsd/wins : difference in macro-F1 per training seed (training randomness)
+#  * 95CI                 : bootstrap over test images of the seed-averaged difference (sampling uncertainty)
 def vs(ref, tag):
     if ref not in results:
         return
-    base_pred = pooled_probs[ref].argmax(1)
     rng2 = np.random.default_rng(1)
     for cfg in results:
         if cfg == ref:
             continue
         dd = [r1["macro_f1"] - r2["macro_f1"] for r1, r2 in zip(results[cfg], results[ref])]
-        pr, boots = pooled_probs[cfg].argmax(1), []
-        for _ in range(1000):
+        boots = []
+        for _ in range(500):
             ix = rng2.integers(0, N, N)
-            boots.append(metrics(y[ix], pr[ix])["macro_f1"] - metrics(y[ix], base_pred[ix])["macro_f1"])
+            boots.append(np.mean([metrics(y[ix], p1[ix])["macro_f1"] - metrics(y[ix], p2[ix])["macro_f1"]
+                                  for p1, p2 in zip(seed_preds[cfg], seed_preds[ref])]))
         lo, hi = np.percentile(boots, [2.5, 97.5])
         m_ = summ.config == cfg
-        summ.loc[m_, f"dF1_vs_{tag}_seedmean"] = float(np.mean(dd))
-        summ.loc[m_, f"dF1_vs_{tag}_seedsd"] = float(np.std(dd))
-        summ.loc[m_, f"wins_vs_{tag}"] = f"{sum(d > 0 for d in dd)}/{len(dd)}"
-        summ.loc[m_, f"dF1_vs_{tag}_95CI"] = f"[{lo:+.3f}, {hi:+.3f}]"
+        summ.loc[m_, f"dF1_vs_{tag}"] = float(np.mean(dd))
+        summ.loc[m_, f"sd_{tag}"] = float(np.std(dd))
+        summ.loc[m_, f"wins_{tag}"] = f"{sum(d > 0 for d in dd)}/{len(dd)}"
+        summ.loc[m_, f"CI_{tag}"] = f"[{lo:+.3f}, {hi:+.3f}]"
 
 
+vs("wrinkle", "wrk")
 vs("fused_shuffled", "shuf")
+vs("fused_zero", "zero")
 summ.to_csv(out / "summary.csv", index=False)
 print("\n", summ.round(3).to_string(index=False))
-print("\nCurvature is only credited if fused beats fused_shuffled (the control), not just wrinkle-only: look at the *_vs_shuf columns.")
+print("\nCurvature is only credited if fused beats the controls (fused_shuffled, fused_zero), not just wrinkle-only: see the *_shuf and *_zero columns.")
 print("saved to", out)

@@ -6,3 +6,14 @@ checkpoints/*.pth
 data/*
 !data/.gitkeep
 outputs/
+myphotos/
+samples/
+truth.csv
+ids.txt
+ffhq_aging_labels.csv
+manual_wrinkle_masks/
+desktop.ini
+outputs/
+checkpoints/
+data/
+.venv/
